@@ -19,3 +19,5 @@ streamlit run app.py
 
 ## 注意
 2D動画ベースの初心者向けMVPです。クラブフェース角、クラブ軌道、手首角度、3D回転量は測定しません。
+
+Deployment target: Railway / mobile MVP
