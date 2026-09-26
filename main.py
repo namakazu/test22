@@ -236,3 +236,22 @@ async def analyze(
             raw.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+@app.get("/selftest")
+def selftest():
+    import numpy as np
+    landmarker = None
+    try:
+        landmarker = create_landmarker()
+        frame = np.zeros((640, 480, 3), dtype=np.uint8)
+        lms = detect_landmarks(frame, landmarker)
+        return {
+            "ok": True,
+            "mediapipe_initialized": True,
+            "opencv_version": cv2.__version__,
+            "pose_detected_on_blank_frame": lms is not None,
+        }
+    finally:
+        if landmarker is not None:
+            landmarker.close()
