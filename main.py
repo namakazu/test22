@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 import cv2
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from pose_utils import calculate_metrics, create_landmarker, detect_landmarks, draw_pose
@@ -154,6 +154,15 @@ def index():
 
 @app.get("/health")
 def health():
+    return {"ok": True}
+
+@app.post("/client-log")
+async def client_log(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {"raw": "invalid-json"}
+    print("CLIENT_LOG", payload, flush=True)
     return {"ok": True}
 
 @app.get("/live", response_class=HTMLResponse)
