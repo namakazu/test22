@@ -57,6 +57,7 @@ video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain
   </div>
 
   <div id="status" class="status">カメラを開始してください。</div>
+  <div id="browserHint" class="small" style="margin:6px 2px 0"></div>
 
   <div id="resultCard" class="card hidden">
     <h2 style="font-size:19px;margin:0 0 8px">今回のスイング</h2>
@@ -77,8 +78,8 @@ video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain
 </div>
 
 <script type="module">
-import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.13";
-const { PoseLandmarker, FilesetResolver } = vision;
+let PoseLandmarker = null;
+let FilesetResolver = null;
 
 const cam = document.getElementById('cam');
 const canvas = document.getElementById('overlay');
@@ -91,6 +92,9 @@ const modelState = document.getElementById('modelState');
 const resultCard = document.getElementById('resultCard');
 const resultEl = document.getElementById('result');
 const metricGrid = document.getElementById('metricGrid');
+const browserHint = document.getElementById('browserHint');
+browserHint.textContent = 'Secure: ' + (window.isSecureContext ? 'OK' : 'NG') +
+  ' / Camera API: ' + ((navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 'OK' : 'NG');
 
 let landmarker = null;
 let stream = null;
@@ -163,40 +167,111 @@ function draw(lm){
 }
 async function loadModel(){
   if(landmarker)return;
-  modelState.innerHTML='<span class="dot"></span>モデル読込中…';
-  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.13/wasm");
+  modelState.innerHTML='<span class="dot"></span>姿勢モデル読込中…';
+  setStatus('カメラ起動済み。姿勢モデルを読み込んでいます…');
+
+  let vision;
+  try{
+    vision = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.13/+esm");
+  }catch(firstErr){
+    try{
+      vision = await import("https://esm.sh/@mediapipe/tasks-vision@0.10.13");
+    }catch(secondErr){
+      throw new Error('MediaPipeを読み込めませんでした。Safariで開き直してください。');
+    }
+  }
+
+  PoseLandmarker = vision.PoseLandmarker || vision.default?.PoseLandmarker;
+  FilesetResolver = vision.FilesetResolver || vision.default?.FilesetResolver;
+  if(!PoseLandmarker || !FilesetResolver){
+    throw new Error('姿勢モデルの初期化APIを取得できませんでした。');
+  }
+
+  const fileset = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.13/wasm"
+  );
   const opts={
-    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"},
-    runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.45
+    baseOptions:{
+      modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+    },
+    runningMode:"VIDEO",
+    numPoses:1,
+    minPoseDetectionConfidence:.45,
+    minPosePresenceConfidence:.45,
+    minTrackingConfidence:.45
   };
   try{
-    landmarker=await PoseLandmarker.createFromOptions(fileset,{...opts,baseOptions:{...opts.baseOptions,delegate:"GPU"}});
+    landmarker=await PoseLandmarker.createFromOptions(
+      fileset,
+      {...opts,baseOptions:{...opts.baseOptions,delegate:"GPU"}}
+    );
   }catch(e){
     landmarker=await PoseLandmarker.createFromOptions(fileset,opts);
   }
   modelState.innerHTML='<span class="dot on"></span>姿勢モデル準備OK';
 }
+
 async function startCamera(){
   startBtn.disabled=true;
   try{
-    await loadModel();
+    if(!window.isSecureContext){
+      throw new Error('HTTPS接続ではないためカメラを利用できません。');
+    }
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+      throw new Error('このブラウザではカメラAPIを利用できません。Safariで開いてください。');
+    }
+
     const facing=document.getElementById('camera').value;
-    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}});
+    setStatus('カメラの許可を待っています…');
+    badge.textContent='カメラ起動中';
+
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:false,
+      video:{
+        facingMode:{ideal:facing},
+        width:{ideal:1280},
+        height:{ideal:720},
+        frameRate:{ideal:30,max:30}
+      }
+    });
+
     cam.srcObject=stream;
     await cam.play();
-    canvas.width=cam.videoWidth; canvas.height=cam.videoHeight;
+    canvas.width=cam.videoWidth;
+    canvas.height=cam.videoHeight;
     const mirror=facing==='user';
-    cam.classList.toggle('mirror',mirror); canvas.classList.toggle('mirror',mirror);
-    running=true; ready=false; stableSince=0; prevWrist=null; swing=null;
-    startBtn.classList.add('hidden');stopBtn.classList.remove('hidden');
+    cam.classList.toggle('mirror',mirror);
+    canvas.classList.toggle('mirror',mirror);
+
+    badge.textContent='カメラ起動済み';
+    setStatus('カメラ起動成功。姿勢モデルを準備しています…','ready');
+
+    await loadModel();
+
+    running=true;
+    ready=false;
+    stableSince=0;
+    prevWrist=null;
+    swing=null;
+    startBtn.classList.add('hidden');
+    stopBtn.classList.remove('hidden');
     badge.textContent='身体を検出中';
     setStatus('全身が枠内に入る位置に立ってください。');
     requestAnimationFrame(loop);
   }catch(e){
-    setStatus('カメラを開始できません: '+e.message);
+    console.error(e);
+    if(stream){
+      stream.getTracks().forEach(t=>t.stop());
+      stream=null;
+      cam.srcObject=null;
+    }
+    badge.textContent='開始できません';
+    setStatus('開始エラー: '+(e?.message || String(e)));
+    modelState.innerHTML='<span class="dot"></span>準備失敗';
     startBtn.disabled=false;
   }
 }
+
 function stopCamera(){
   running=false;
   if(stream) stream.getTracks().forEach(t=>t.stop());
