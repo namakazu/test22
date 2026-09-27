@@ -50,7 +50,7 @@ video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain
   </div>
 
   <div class="camera">
-    <video id="cam" playsinline muted autoplay></video>
+    <video id="cam" playsinline webkit-playsinline muted autoplay></video>
     <canvas id="overlay"></canvas>
     <div class="guide"></div>
     <div class="badge" id="badge">カメラ停止中</div>
@@ -93,8 +93,27 @@ const resultCard = document.getElementById('resultCard');
 const resultEl = document.getElementById('result');
 const metricGrid = document.getElementById('metricGrid');
 const browserHint = document.getElementById('browserHint');
+
+async function clientLog(stage, extra={}){
+  try{
+    await fetch('/client-log', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        stage,
+        extra,
+        ua:navigator.userAgent,
+        secure:window.isSecureContext,
+        href:location.href
+      }),
+      keepalive:true
+    });
+  }catch(_){}
+}
+
 browserHint.textContent = 'Secure: ' + (window.isSecureContext ? 'OK' : 'NG') +
   ' / Camera API: ' + ((navigator.mediaDevices && navigator.mediaDevices.getUserMedia) ? 'OK' : 'NG');
+clientLog('page_loaded', {cameraApi:!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)});
 
 let landmarker = null;
 let stream = null;
@@ -211,9 +230,36 @@ async function loadModel(){
   modelState.innerHTML='<span class="dot on"></span>姿勢モデル準備OK';
 }
 
+async function waitForVideoReady(video, timeoutMs=5000){
+  const started=Date.now();
+  while(Date.now()-started < timeoutMs){
+    if(video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) return true;
+    await new Promise(r=>setTimeout(r,100));
+  }
+  return false;
+}
+
+async function requestCamera(facing){
+  const primary={
+    audio:false,
+    video:{
+      facingMode:{ideal:facing},
+      width:{ideal:1280},
+      height:{ideal:720}
+    }
+  };
+  try{
+    return await navigator.mediaDevices.getUserMedia(primary);
+  }catch(firstErr){
+    await clientLog('camera_primary_failed', {name:firstErr?.name, message:firstErr?.message});
+    return await navigator.mediaDevices.getUserMedia({audio:false,video:true});
+  }
+}
+
 async function startCamera(){
   startBtn.disabled=true;
   try{
+    await clientLog('start_clicked');
     if(!window.isSecureContext){
       throw new Error('HTTPS接続ではないためカメラを利用できません。');
     }
@@ -225,18 +271,30 @@ async function startCamera(){
     setStatus('カメラの許可を待っています…');
     badge.textContent='カメラ起動中';
 
-    stream=await navigator.mediaDevices.getUserMedia({
-      audio:false,
-      video:{
-        facingMode:{ideal:facing},
-        width:{ideal:1280},
-        height:{ideal:720},
-        frameRate:{ideal:30,max:30}
-      }
+    stream=await requestCamera(facing);
+    await clientLog('camera_stream_ok', {
+      tracks:stream.getVideoTracks().map(t=>({label:t.label,settings:t.getSettings?.()}))
     });
 
     cam.srcObject=stream;
-    await cam.play();
+    cam.muted=true;
+    cam.setAttribute('playsinline','');
+    cam.setAttribute('webkit-playsinline','');
+    try{ await cam.play(); }catch(playErr){
+      await clientLog('video_play_failed', {name:playErr?.name,message:playErr?.message});
+    }
+
+    const readyVideo = await waitForVideoReady(cam, 6000);
+    await clientLog('video_ready_check', {
+      ready:readyVideo,
+      readyState:cam.readyState,
+      width:cam.videoWidth,
+      height:cam.videoHeight
+    });
+    if(!readyVideo){
+      throw new Error('カメラ権限は取得できましたが映像を表示できません。Safariでページを再読み込みしてください。');
+    }
+
     canvas.width=cam.videoWidth;
     canvas.height=cam.videoHeight;
     const mirror=facing==='user';
@@ -244,9 +302,18 @@ async function startCamera(){
     canvas.classList.toggle('mirror',mirror);
 
     badge.textContent='カメラ起動済み';
-    setStatus('カメラ起動成功。姿勢モデルを準備しています…','ready');
+    setStatus('カメラ映像OK。姿勢モデルを準備しています…','ready');
 
-    await loadModel();
+    // iPhoneで先に映像を描画させる
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+
+    try{
+      await loadModel();
+      await clientLog('model_ready');
+    }catch(modelErr){
+      await clientLog('model_failed', {name:modelErr?.name,message:modelErr?.message});
+      throw modelErr;
+    }
 
     running=true;
     ready=false;
@@ -260,6 +327,7 @@ async function startCamera(){
     requestAnimationFrame(loop);
   }catch(e){
     console.error(e);
+    await clientLog('start_failed', {name:e?.name,message:e?.message});
     if(stream){
       stream.getTracks().forEach(t=>t.stop());
       stream=null;
