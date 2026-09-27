@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#102018">
+<title>Golf Form Coach - Live</title>
+<style>
+:root{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue","Noto Sans JP",sans-serif;color:#132018;background:#eef2ee}
+*{box-sizing:border-box}body{margin:0}.wrap{max-width:760px;margin:auto;padding:14px 12px 80px}
+.top{display:flex;gap:10px;align-items:center;margin:4px 0 12px}.back{width:auto;padding:9px 12px;margin:0;background:#fff;color:#274535;border:1px solid #d8dfda}
+h1{font-size:23px;margin:0}.sub{font-size:13px;color:#617066;line-height:1.5;margin:6px 2px 12px}
+.card{background:#fff;border-radius:18px;padding:14px;margin:12px 0;box-shadow:0 4px 18px #0000000a}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{font-size:13px;font-weight:700;display:block;margin-bottom:5px}
+select,button{width:100%;font-size:16px;border-radius:13px;padding:12px;border:1px solid #d6ddd8;background:#fff}
+button{border:0;background:#2f6b4f;color:#fff;font-weight:800;margin-top:10px;min-height:48px}
+button.secondary{background:#eef3ef;color:#294d39}.camera{position:relative;width:100%;background:#0b0e0c;border-radius:18px;overflow:hidden;aspect-ratio:3/4}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+.mirror{transform:scaleX(-1)}
+.badge{position:absolute;top:10px;left:10px;z-index:3;background:#000b;color:white;padding:8px 11px;border-radius:999px;font-size:13px;font-weight:800}
+.guide{position:absolute;inset:9% 10%;border:1.5px dashed #ffffff88;border-radius:28px;pointer-events:none}
+.status{padding:12px;border-radius:14px;background:#f3f6f3;margin-top:10px;font-weight:700;line-height:1.45}
+.status.ready{background:#e5f5e9;color:#175b2d}.status.swing{background:#fff3d7;color:#7a4d00}
+.result{line-height:1.55}.issue{background:#f5f8f5;border-radius:14px;padding:13px;margin-top:10px}.issue b{font-size:16px}.cue{font-size:18px;font-weight:900;color:#205c3b;margin:8px 0}
+.small{font-size:12px;color:#6d786f;line-height:1.5}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.metric{background:#f4f7f4;border-radius:12px;padding:10px}.metric strong{display:block;font-size:18px}.metric span{font-size:11px;color:#68746b}
+.hidden{display:none}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#aaa;margin-right:6px}.dot.on{background:#39b95f}
+@media(min-width:650px){.camera{aspect-ratio:4/3}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <button class="back" onclick="location.href='/'">← 戻る</button>
+    <h1>🏌️ リアルタイム練習</h1>
+  </div>
+  <div class="sub">カメラ映像は端末内で解析します。動画はサーバーへアップロードしません。スイング後に次の1球で直すポイントを返します。</div>
+
+  <div class="card">
+    <div class="grid">
+      <div><label>撮影方向</label><select id="view"><option value="face">正面（Face-on）</option><option value="dtl">後方（Down-the-line）</option></select></div>
+      <div><label>利き打ち</label><select id="hand"><option value="right">右打ち</option><option value="left">左打ち</option></select></div>
+      <div><label>カメラ</label><select id="camera"><option value="environment">背面カメラ</option><option value="user">前面カメラ</option></select></div>
+      <div><label>音声</label><select id="voice"><option value="on">結果を読み上げる</option><option value="off">読み上げない</option></select></div>
+    </div>
+    <button id="start">カメラを開始</button>
+    <button id="stop" class="secondary hidden">停止</button>
+    <div id="modelState" class="small" style="margin-top:8px"><span class="dot"></span>モデル未読込</div>
+  </div>
+
+  <div class="camera">
+    <video id="cam" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div class="guide"></div>
+    <div class="badge" id="badge">カメラ停止中</div>
+  </div>
+
+  <div id="status" class="status">カメラを開始してください。</div>
+
+  <div id="resultCard" class="card hidden">
+    <h2 style="font-size:19px;margin:0 0 8px">今回のスイング</h2>
+    <div id="result" class="result"></div>
+    <div id="metricGrid" class="metrics"></div>
+    <div class="small" style="margin-top:10px">※ インパクトは手首速度からの推定です。クラブフェースやボール軌道は判定していません。</div>
+  </div>
+
+  <div class="card">
+    <b>使い方</b>
+    <ol class="small" style="font-size:13px;line-height:1.7;padding-left:22px">
+      <li>頭から足まで入る位置にスマホを固定</li>
+      <li>カメラ開始後、構えて約1秒静止</li>
+      <li>「準備OK」になったら普通に1球打つ</li>
+      <li>スイング後、次の1球の修正点を確認</li>
+    </ol>
+  </div>
+</div>
+
+<script type="module">
+import vision from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.13";
+const { PoseLandmarker, FilesetResolver } = vision;
+
+const cam = document.getElementById('cam');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const statusEl = document.getElementById('status');
+const badge = document.getElementById('badge');
+const modelState = document.getElementById('modelState');
+const resultCard = document.getElementById('resultCard');
+const resultEl = document.getElementById('result');
+const metricGrid = document.getElementById('metricGrid');
+
+let landmarker = null;
+let stream = null;
+let running = false;
+let busy = false;
+let lastProcess = 0;
+let prevWrist = null;
+let prevTs = 0;
+let stableSince = 0;
+let ready = false;
+let addressSample = null;
+let swing = null;
+let quietFrames = 0;
+let swingCount = 0;
+let previousSummary = null;
+
+const C = [[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28]];
+
+function setStatus(text, kind=''){
+  statusEl.textContent=text;
+  statusEl.className='status '+kind;
+}
+function dist(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+function mid(a,b){ return {x:(a.x+b.x)/2,y:(a.y+b.y)/2}; }
+function angle(a,b,c,aspect=1){
+  const ax=(a.x-b.x)*aspect, ay=a.y-b.y, cx=(c.x-b.x)*aspect, cy=c.y-b.y;
+  const den=Math.hypot(ax,ay)*Math.hypot(cx,cy); if(!den)return NaN;
+  return Math.acos(Math.max(-1,Math.min(1,(ax*cx+ay*cy)/den)))*180/Math.PI;
+}
+function lineAngle(a,b,aspect=1){
+  const dx=(b.x-a.x)*aspect, dy=b.y-a.y;
+  let d=Math.abs(Math.atan2(dy,dx)*180/Math.PI); return Math.min(d,180-d);
+}
+function metrics(lm){
+  const aspect=(cam.videoWidth||1)/(cam.videoHeight||1);
+  const ls=lm[11],rs=lm[12],lh=lm[23],rh=lm[24],nose=lm[0];
+  const ms=mid(ls,rs), mh=mid(lh,rh);
+  const torso=lineAngle(mh,ms,aspect);
+  return {
+    kneeL:angle(lh,lm[25],lm[27],aspect),
+    kneeR:angle(rh,lm[26],lm[28],aspect),
+    elbowL:angle(ls,lm[13],lm[15],aspect),
+    elbowR:angle(rs,lm[14],lm[16],aspect),
+    lean:Math.abs(90-torso),
+    headX:nose.x, headY:nose.y,
+    hipX:mh.x, hipY:mh.y,
+    shoulderW:Math.abs(rs.x-ls.x),
+    wristY:(lm[15].y+lm[16].y)/2,
+    wristX:(lm[15].x+lm[16].x)/2
+  };
+}
+function visibleEnough(lm){
+  const ids=[0,11,12,15,16,23,24,25,26,27,28];
+  return ids.filter(i => (lm[i]?.visibility ?? 1) > .35).length >= 9;
+}
+function draw(lm){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  ctx.strokeStyle='#74ff9a';ctx.lineWidth=Math.max(3,canvas.width/180);
+  for(const [a,b] of C){
+    const A=lm[a],B=lm[b]; if(!A||!B)continue;
+    if((A.visibility??1)<.3||(B.visibility??1)<.3)continue;
+    ctx.beginPath();ctx.moveTo(A.x*canvas.width,A.y*canvas.height);ctx.lineTo(B.x*canvas.width,B.y*canvas.height);ctx.stroke();
+  }
+  ctx.fillStyle='#fff';
+  for(const i of [0,11,12,13,14,15,16,23,24,25,26,27,28]){
+    const p=lm[i]; if(!p||(p.visibility??1)<.3)continue;
+    ctx.beginPath();ctx.arc(p.x*canvas.width,p.y*canvas.height,Math.max(3,canvas.width/160),0,Math.PI*2);ctx.fill();
+  }
+}
+async function loadModel(){
+  if(landmarker)return;
+  modelState.innerHTML='<span class="dot"></span>モデル読込中…';
+  const fileset = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.13/wasm");
+  const opts={
+    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"},
+    runningMode:"VIDEO",numPoses:1,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.45
+  };
+  try{
+    landmarker=await PoseLandmarker.createFromOptions(fileset,{...opts,baseOptions:{...opts.baseOptions,delegate:"GPU"}});
+  }catch(e){
+    landmarker=await PoseLandmarker.createFromOptions(fileset,opts);
+  }
+  modelState.innerHTML='<span class="dot on"></span>姿勢モデル準備OK';
+}
+async function startCamera(){
+  startBtn.disabled=true;
+  try{
+    await loadModel();
+    const facing=document.getElementById('camera').value;
+    stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facing},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}});
+    cam.srcObject=stream;
+    await cam.play();
+    canvas.width=cam.videoWidth; canvas.height=cam.videoHeight;
+    const mirror=facing==='user';
+    cam.classList.toggle('mirror',mirror); canvas.classList.toggle('mirror',mirror);
+    running=true; ready=false; stableSince=0; prevWrist=null; swing=null;
+    startBtn.classList.add('hidden');stopBtn.classList.remove('hidden');
+    badge.textContent='身体を検出中';
+    setStatus('全身が枠内に入る位置に立ってください。');
+    requestAnimationFrame(loop);
+  }catch(e){
+    setStatus('カメラを開始できません: '+e.message);
+    startBtn.disabled=false;
+  }
+}
+function stopCamera(){
+  running=false;
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  stream=null;cam.srcObject=null;ctx.clearRect(0,0,canvas.width,canvas.height);
+  startBtn.classList.remove('hidden');stopBtn.classList.add('hidden');startBtn.disabled=false;
+  badge.textContent='カメラ停止中';setStatus('カメラを停止しました。');
+}
+function handlePose(lm, ts){
+  if(!visibleEnough(lm)){
+    ready=false;stableSince=0;badge.textContent='全身を入れてください';setStatus('頭・腰・膝・足先まで映るように位置を調整してください。');return;
+  }
+  const m=metrics(lm), shoulder=Math.max(m.shoulderW,.05);
+  const wrist={x:m.wristX,y:m.wristY};
+  let speed=0;
+  if(prevWrist && prevTs){
+    const dt=Math.max((ts-prevTs)/1000,.02);
+    speed=dist(wrist,prevWrist)/shoulder/dt;
+  }
+  prevWrist=wrist;prevTs=ts;
+  const sample={ts,m,speed,lm};
+
+  if(!swing){
+    if(speed < .55){
+      if(!stableSince)stableSince=ts;
+      addressSample=sample;
+      if(ts-stableSince>700){
+        ready=true;badge.textContent='準備OK';setStatus('準備OK。いつでもスイングしてください。','ready');
+      }
+    }else if(!ready){
+      stableSince=0;
+    }
+    if(ready && speed>2.0){
+      swing={start:ts,samples:[addressSample,sample].filter(Boolean)};
+      quietFrames=0;ready=false;badge.textContent='SWING';setStatus('スイング検出中…','swing');
+    }
+  }else{
+    swing.samples.push(sample);
+    const dur=ts-swing.start;
+    if(speed<.65 && dur>450)quietFrames++; else quietFrames=0;
+    if((quietFrames>=5 && dur>650)||dur>3200){
+      finishSwing(swing);swing=null;stableSince=0;quietFrames=0;
+    }
+  }
+}
+function pickPhases(s){
+  const a=s.samples[0];
+  let topIdx=0;
+  for(let i=0;i<s.samples.length;i++) if(s.samples[i].m.wristY < s.samples[topIdx].m.wristY) topIdx=i;
+  let impactIdx=Math.min(s.samples.length-1,topIdx+1);
+  for(let i=topIdx;i<s.samples.length;i++) if(s.samples[i].speed>s.samples[impactIdx].speed)impactIdx=i;
+  return {address:a,top:s.samples[topIdx],impact:s.samples[impactIdx],finish:s.samples[s.samples.length-1]};
+}
+function diagnose(p){
+  const view=document.getElementById('view').value;
+  const hand=document.getElementById('hand').value;
+  const A=p.address.m,T=p.top.m,I=p.impact.m;
+  const issues=[], positives=[], summary={};
+  const knee=(A.kneeL+A.kneeR)/2;
+  summary.knee=knee;
+  if(knee>=172)issues.push({score:.78,title:'構えで膝が伸び切り気味',cue:'膝の力を抜いて、少しだけ沈む',detail:'アドレスの膝角度は約'+knee.toFixed(0)+'°'});
+  else if(knee<=125)issues.push({score:.72,title:'構えで腰を落としすぎ気味',cue:'お尻を後ろ、膝は少しだけ',detail:'アドレスの膝角度は約'+knee.toFixed(0)+'°'});
+  else if(knee>=138&&knee<=168)positives.push('アドレスの膝は極端ではありません。');
+
+  const leadTop=hand==='right'?T.elbowL:T.elbowR;
+  const leadImpact=hand==='right'?I.elbowL:I.elbowR;
+  summary.leadTop=leadTop;summary.leadImpact=leadImpact;
+  if(leadTop<130)issues.push({score:.63,title:'トップでリード腕が曲がり気味',cue:'胸から手を遠ざける',detail:'トップのリード肘は約'+leadTop.toFixed(0)+'°'});
+  if(leadImpact<138)issues.push({score:.58,title:'インパクト付近で腕が縮み気味',cue:'ボールを打ちに行かず、体を回して振り抜く',detail:'推定インパクトのリード肘は約'+leadImpact.toFixed(0)+'°'});
+
+  if(view==='face'){
+    const sway=Math.abs(T.hipX-A.hipX)/Math.max(A.shoulderW,.03);
+    const head=Math.abs(I.headX-A.headX)/Math.max(A.shoulderW,.03);
+    summary.sway=sway;summary.headMove=head;
+    if(sway>.72)issues.push({score:Math.min(.95,.62+sway*.22),title:'バックスイングで腰が横に流れ気味',cue:'右へ動かず、その場で胸を回す',detail:'腰の横移動は肩幅の約'+sway.toFixed(1)+'倍'});
+    else if(sway<.42)positives.push('腰の横移動は比較的小さめです。');
+    if(head>.62)issues.push({score:Math.min(.9,.56+head*.2),title:'頭の横移動が大きめ',cue:'頭を固定せず、胸の中心を暴れさせない',detail:'頭の横移動は肩幅の約'+head.toFixed(1)+'倍'});
+    else if(head<.38)positives.push('頭の横移動は比較的小さめです。');
+  }else{
+    const change=Math.abs(I.lean-A.lean);
+    summary.lean=A.lean;summary.leanChange=change;
+    if(A.lean<16)issues.push({score:.74,title:'アドレスが起き気味',cue:'股関節から軽くお辞儀する',detail:'前傾は鉛直から約'+A.lean.toFixed(0)+'°'});
+    else if(A.lean>52)issues.push({score:.72,title:'アドレスで前に倒れすぎ気味',cue:'胸を少し起こして足裏の真ん中で立つ',detail:'前傾は鉛直から約'+A.lean.toFixed(0)+'°'});
+    if(change>16)issues.push({score:Math.min(.9,.6+change/100),title:'インパクトまでに前傾が大きく変化',cue:'お尻の位置を保ったまま回る',detail:'前傾変化は約'+change.toFixed(0)+'°'});
+    else if(change<=10)positives.push('前傾姿勢の変化は比較的小さめです。');
+    const rise=(A.headY-I.headY)/Math.max(A.shoulderW,.03);
+    summary.rise=rise;
+    if(rise>.55)issues.push({score:Math.min(.86,.55+rise*.18),title:'インパクトで起き上がり気味',cue:'頭を下げず、お尻を後ろに残す',detail:'頭の上昇量が大きめです'});
+  }
+  issues.sort((a,b)=>b.score-a.score);
+  return {issues:issues.slice(0,2),positives,summary};
+}
+function finishSwing(s){
+  swingCount++;
+  const p=pickPhases(s);
+  const d=diagnose(p);
+  badge.textContent='解析完了 #'+swingCount;
+  setStatus('解析完了。結果を確認して、次の1球へ。','ready');
+  let html='';
+  if(d.issues.length){
+    d.issues.forEach((x,i)=>{html += '<div class="issue"><b>'+(i+1)+'. '+x.title+'</b><div class="small">'+x.detail+'</div><div class="cue">🎯 '+x.cue+'</div></div>';});
+  }else{
+    html='<div class="issue"><b>大きな崩れは検出されませんでした</b><div class="cue">🎯 同じテンポでもう1球</div></div>';
+  }
+  if(d.positives.length) html += '<div class="small" style="margin-top:10px">✅ '+d.positives.slice(0,2).join('<br>✅ ')+'</div>';
+  if(previousSummary){
+    const comps=[];
+    if(d.summary.sway!=null&&previousSummary.sway!=null){
+      const diff=(previousSummary.sway-d.summary.sway)/previousSummary.sway*100;
+      if(Math.abs(diff)>5) comps.push('腰の横移動 '+(diff>0?'↓ '+diff.toFixed(0)+'% 改善':'↑ '+Math.abs(diff).toFixed(0)+'%'));
+    }
+    if(d.summary.leanChange!=null&&previousSummary.leanChange!=null){
+      const diff=previousSummary.leanChange-d.summary.leanChange;
+      if(Math.abs(diff)>2) comps.push('前傾変化 '+(diff>0?'↓ '+diff.toFixed(0)+'° 改善':'↑ '+Math.abs(diff).toFixed(0)+'°'));
+    }
+    if(comps.length) html += '<div class="issue"><b>前回との比較</b><div style="margin-top:6px">'+comps.join('<br>')+'</div></div>';
+  }
+  resultEl.innerHTML=html;
+  const items=[];
+  if(d.summary.sway!=null)items.push(['腰の横移動',d.summary.sway.toFixed(2)+'×肩幅']);
+  if(d.summary.headMove!=null)items.push(['頭の横移動',d.summary.headMove.toFixed(2)+'×肩幅']);
+  if(d.summary.lean!=null)items.push(['アドレス前傾',d.summary.lean.toFixed(0)+'°']);
+  if(d.summary.leanChange!=null)items.push(['前傾変化',d.summary.leanChange.toFixed(0)+'°']);
+  items.push(['膝角度',d.summary.knee.toFixed(0)+'°']);
+  metricGrid.innerHTML=items.slice(0,4).map(([k,v])=>'<div class="metric"><strong>'+v+'</strong><span>'+k+'</span></div>').join('');
+  previousSummary=d.summary;resultCard.classList.remove('hidden');
+  resultCard.scrollIntoView({behavior:'smooth',block:'nearest'});
+  const first=d.issues[0];
+  if(first && document.getElementById('voice').value==='on' && 'speechSynthesis' in window){
+    speechSynthesis.cancel(); const u=new SpeechSynthesisUtterance('次は、'+first.cue);u.lang='ja-JP';u.rate=1.05;speechSynthesis.speak(u);
+  }
+}
+function loop(ts){
+  if(!running)return;
+  if(ts-lastProcess<75){requestAnimationFrame(loop);return;}
+  if(busy){requestAnimationFrame(loop);return;}
+  lastProcess=ts;busy=true;
+  try{
+    landmarker.detectForVideo(cam,ts,(r)=>{
+      busy=false;
+      if(r.landmarks&&r.landmarks[0]){
+        draw(r.landmarks[0]);handlePose(r.landmarks[0],ts);
+      }else{
+        ctx.clearRect(0,0,canvas.width,canvas.height);ready=false;stableSince=0;badge.textContent='身体を探しています';
+      }
+    });
+  }catch(e){busy=false;setStatus('姿勢解析エラー: '+e.message);}
+  requestAnimationFrame(loop);
+}
+startBtn.addEventListener('click',startCamera);
+stopBtn.addEventListener('click',stopCamera);
+document.getElementById('camera').addEventListener('change',()=>{if(running){stopCamera();startCamera();}});
+</script>
+</body>
+</html>
