@@ -49,7 +49,12 @@ button:disabled{opacity:.55}
 <body>
 <div class="wrap">
   <h1>🏌️ Golf Form Coach</h1>
-  <div class="sub">初心者向けフォーム改善。外部AI/APIは使いません。動画から身体の動きを解析し、次の10球で直すポイントを最大2つ返します。</div>
+  <div class="sub">初心者向けフォーム改善。外部AI/APIは使いません。</div>
+  <div class="card">
+    <button onclick="location.href='/live'">📷 リアルタイム練習モード</button>
+    <div class="note" style="margin-top:8px">スマホを置いて、1球ごとに自動判定。動画は端末内で解析します。</div>
+  </div>
+  <div class="sub">または、撮影済み動画をアップロードして解析できます。</div>
 
   <div class="card">
     <label>① スイング動画</label>
@@ -150,6 +155,10 @@ def index():
 @app.get("/health")
 def health():
     return {"ok": True}
+
+@app.get("/live", response_class=HTMLResponse)
+def live():
+    return Path("live.html").read_text(encoding="utf-8")
 
 @app.post("/analyze")
 async def analyze(
